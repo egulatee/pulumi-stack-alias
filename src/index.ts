@@ -1,28 +1,32 @@
 /**
  * @egulatee/pulumi-stack-alias
  *
- * A lightweight stack resolver library for Pulumi that enables producer-controlled
- * stack aliasing through redirect pointers. Eliminates output staleness and
- * operational overhead by using lightweight alias stacks that export only a
- * redirect pointer to the canonical stack.
+ * Producer-side stack aliasing for Pulumi using lightweight proxy stacks.
  *
- * ## Producer-Controlled Redirect Pattern
+ * Consumers use standard StackReference (no library dependency).
+ * Producers use this library to create alias stacks that re-export outputs.
  *
- * Alias stacks export a `_canonicalStack` pointer. The consumer-side resolver
- * transparently follows redirects to reach the canonical stack, ensuring outputs
- * are always fresh.
+ * ## Producer-Controlled Proxy Pattern
+ *
+ * Alias stacks re-export outputs from canonical stacks. Consumers use standard
+ * Pulumi StackReference without any library dependency. Producers use this
+ * library to create proxy stacks that keep outputs in sync.
  *
  * @packageDocumentation
  */
 
 export {
-  resolveStackRef,
+  createStackAlias,
+  createConditionalAlias,
+  createSimpleAlias,
   matchesPattern,
 } from "./alias";
 
-export {
-  ResolveStackRefOptions,
-  REDIRECT_KEY,
+export type {
+  AliasConfig,
+  AliasExports,
+  PatternRule,
+  ConditionalAliasConfig,
 } from "./types";
 
 // Re-export Pulumi types for convenience
