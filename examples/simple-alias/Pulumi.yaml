@@ -1,0 +1,4 @@
+name: infrastructure
+description: Example infrastructure project with stack aliasing
+runtime:
+  name: nodejs

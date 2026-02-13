@@ -1,0 +1,2 @@
+config:
+  infrastructure:aliasTarget: shared  # staging aliases to shared

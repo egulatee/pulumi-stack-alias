@@ -1,0 +1,53 @@
+{
+  "name": "@egulatee/pulumi-stack-alias",
+  "version": "0.1.0",
+  "description": "A generalized stack aliasing system for Pulumi that enables transparent stack references and environment mapping",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pulumi-alias": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src --ext .ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "pulumi",
+    "infrastructure-as-code",
+    "stack-alias",
+    "stack-reference",
+    "devops",
+    "multi-environment"
+  ],
+  "author": "Eric Gulatee",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/egulatee/pulumi-stack-alias.git"
+  },
+  "bugs": {
+    "url": "https://github.com/egulatee/pulumi-stack-alias/issues"
+  },
+  "homepage": "https://github.com/egulatee/pulumi-stack-alias#readme",
+  "peerDependencies": {
+    "@pulumi/pulumi": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vitest/coverage-v8": "^1.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "dependencies": {
+    "commander": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

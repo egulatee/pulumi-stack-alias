@@ -1,0 +1,4 @@
+config:
+  # This configures the dev stack to be an alias
+  infrastructure:aliasTarget: shared
+  infrastructure:aliasProject: infrastructure

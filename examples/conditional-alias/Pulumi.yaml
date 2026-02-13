@@ -1,0 +1,4 @@
+name: infrastructure
+description: Conditional alias example with environment detection
+runtime:
+  name: nodejs
