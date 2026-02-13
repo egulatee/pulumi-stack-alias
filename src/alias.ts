@@ -80,9 +80,9 @@ export function resolveStackRef(
  * }
  * ```
  *
- * @param canonicalStackName - The name of the canonical stack to redirect to
+ * @param _canonicalStackName - The name of the canonical stack to redirect to
  */
-export function exportCanonicalPointer(canonicalStackName: string): void {
+export function exportCanonicalPointer(_canonicalStackName: string): void {
   // This function is meant to be used with dynamic exports
   // The caller should use: export const _canonicalStack = result
   // We'll just log for now, but the real pattern is direct export

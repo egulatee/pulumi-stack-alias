@@ -59,4 +59,5 @@ jobs:
         run: |
           test -f dist/index.js || exit 1
           test -f dist/index.d.ts || exit 1
-          test -f dist/cli.js || exit 1
+          test -f dist/alias.js || exit 1
+          test -f dist/types.js || exit 1
