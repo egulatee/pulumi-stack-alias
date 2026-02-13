@@ -1,72 +1,37 @@
 import * as pulumi from "@pulumi/pulumi";
 
 /**
- * Configuration for creating a stack alias
+ * The output key used to indicate a stack is an alias pointing to a canonical stack
  */
-export interface AliasConfig {
-  /**
-   * Target organization (defaults to current organization)
-   */
-  targetOrg?: string;
+export const REDIRECT_KEY = "_canonicalStack";
 
+/**
+ * Options for resolveStackRef function
+ */
+export interface ResolveStackRefOptions {
   /**
-   * Target project name (e.g., "infrastructure")
+   * Target organization name
+   * @default pulumi.getOrganization()
    */
-  targetProject: string;
-
-  /**
-   * Target stack name (e.g., "shared")
-   */
-  targetStack: string;
-
-  /**
-   * List of output names to re-export from the target stack
-   */
-  outputs: string[];
+  org?: string;
 }
 
 /**
- * Stack alias exports - maps output names to their values
+ * Result of stack resolution containing the canonical stack reference
  */
-export type AliasExports = Record<string, pulumi.Output<any>>;
-
-/**
- * Pattern matching configuration for dynamic alias resolution
- */
-export interface PatternConfig {
+export interface ResolvedStack {
   /**
-   * Pattern string (supports wildcards)
-   * Examples: "projectname/stackname", "projectname/*", "* /stackname"
+   * The canonical stack reference (after following any redirects)
    */
-  pattern: string;
+  stackRef: pulumi.StackReference;
 
   /**
-   * Target stack to alias to
+   * Whether a redirect was followed (true if alias, false if canonical)
    */
-  target: string;
-}
-
-/**
- * Configuration for conditional aliasing behavior
- */
-export interface ConditionalAliasConfig {
-  /**
-   * Target project name
-   */
-  targetProject: string;
+  wasRedirected: boolean;
 
   /**
-   * Mapping patterns (evaluated in order)
+   * The final stack name that was resolved
    */
-  patterns: PatternConfig[];
-
-  /**
-   * Default target if no pattern matches
-   */
-  defaultTarget?: string;
-
-  /**
-   * List of outputs to re-export
-   */
-  outputs: string[];
+  resolvedStackName: string;
 }
