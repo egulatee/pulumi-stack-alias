@@ -1,95 +1,129 @@
 import * as pulumi from "@pulumi/pulumi";
-import { ResolveStackRefOptions, REDIRECT_KEY } from "./types";
+import {
+  AliasConfig,
+  AliasExports,
+  ConditionalAliasConfig,
+} from "./types";
 
 /**
- * Resolves a stack reference by checking for producer-controlled redirects
+ * Creates a stack alias that re-exports outputs from a target stack
  *
- * This function implements the Producer-Controlled Redirect pattern:
- * 1. Creates a StackReference to the target project using the current stack name
- * 2. Checks if the stack exports a `_canonicalStack` redirect pointer
- * 3. If redirect exists, follows it to the canonical stack
- * 4. Returns the canonical StackReference wrapped in Output
- *
- * The producer (infrastructure project) controls aliasing decisions by exporting
- * `_canonicalStack` in alias stacks. The consumer has zero knowledge of aliasing.
+ * This is the core function of the Producer-Controlled Proxy pattern.
+ * It creates a StackReference to the target stack and re-exports specified outputs.
  *
  * @example
  * ```typescript
- * // Consumer code (application/index.ts)
- * import { resolveStackRef } from "@egulatee/pulumi-stack-alias";
+ * // In alias stack infrastructure/dev
+ * import { createStackAlias } from "@egulatee/pulumi-stack-alias";
  *
- * const infraStack = resolveStackRef("infrastructure");
- * const vpcId = infraStack.apply(ref => ref.requireOutput("vpcId"));
+ * const alias = createStackAlias({
+ *   targetProject: "infrastructure",
+ *   targetStack: "shared",
+ *   outputs: ["vpcId", "clusterName", "endpoint"]
+ * });
  *
- * // When application/dev deploys:
- * // → reads infrastructure/dev
- * // → finds _canonicalStack: "shared"
- * // → returns StackReference to infrastructure/shared
- * // → vpcId is always fresh from canonical stack!
+ * export const vpcId = alias.vpcId;
+ * export const clusterName = alias.clusterName;
+ * export const endpoint = alias.endpoint;
  * ```
  *
- * @param project - Target project name (e.g., "infrastructure")
- * @param opts - Optional configuration
- * @returns Output containing the resolved StackReference
+ * @param config - Alias configuration
+ * @returns Record of Pulumi Outputs for each specified output name
  */
-export function resolveStackRef(
-  project: string,
-  opts?: ResolveStackRefOptions
-): pulumi.Output<pulumi.StackReference> {
-  const org = opts?.org || pulumi.getOrganization();
-  const stack = pulumi.getStack();
+export function createStackAlias(config: AliasConfig): AliasExports {
+  const org = config.targetOrg || pulumi.getOrganization();
+  const targetStackName = `${org}/${config.targetProject}/${config.targetStack}`;
+  const targetStack = new pulumi.StackReference(targetStackName);
 
-  // Create initial reference to project/currentStack
-  const initialStackName = `${org}/${project}/${stack}`;
-  const initialRef = new pulumi.StackReference(initialStackName);
+  const exports: AliasExports = {};
+  for (const outputName of config.outputs) {
+    exports[outputName] = targetStack.requireOutput(outputName);
+  }
 
-  // Check for redirect pointer
-  return initialRef.getOutput(REDIRECT_KEY).apply((canonical) => {
-    if (canonical && typeof canonical === "string") {
-      // Redirect exists — follow it to the canonical stack
-      const canonicalStackName = `${org}/${project}/${canonical}`;
-      return new pulumi.StackReference(canonicalStackName);
+  return exports;
+}
+
+/**
+ * Creates a conditional alias based on pattern matching
+ *
+ * Evaluates pattern rules in order and uses the first matching target.
+ * Falls back to defaultTarget if no pattern matches.
+ *
+ * @example
+ * ```typescript
+ * // In infrastructure/index.ts
+ * import { createConditionalAlias } from "@egulatee/pulumi-stack-alias";
+ *
+ * const alias = createConditionalAlias({
+ *   targetProject: "infrastructure",
+ *   patterns: [
+ *     { pattern: "*\/prod", target: "prod" },
+ *     { pattern: "*\/staging", target: "shared" },
+ *     { pattern: "*\/*-ephemeral", target: "shared" }
+ *   ],
+ *   defaultTarget: "shared",
+ *   outputs: ["vpcId", "endpoint"]
+ * });
+ *
+ * export const vpcId = alias.vpcId;
+ * export const endpoint = alias.endpoint;
+ * ```
+ *
+ * @param config - Conditional alias configuration
+ * @returns Record of Pulumi Outputs for each specified output name
+ */
+export function createConditionalAlias(config: ConditionalAliasConfig): AliasExports {
+  const currentProject = pulumi.getProject();
+  const currentStack = pulumi.getStack();
+
+  // Find first matching pattern
+  let targetStack = config.defaultTarget;
+  for (const rule of config.patterns) {
+    if (matchesPattern(rule.pattern, currentProject, currentStack)) {
+      targetStack = rule.target;
+      break;
     }
+  }
 
-    // No redirect — this is already the canonical stack
-    return initialRef;
+  if (!targetStack) {
+    throw new Error(
+      `No matching pattern found for ${currentProject}/${currentStack} ` +
+      `and no defaultTarget specified.`
+    );
+  }
+
+  return createStackAlias({
+    targetProject: config.targetProject,
+    targetStack: targetStack,
+    targetOrg: config.targetOrg,
+    outputs: config.outputs,
   });
 }
 
 /**
- * Helper function for producer projects to export canonical stack pointer
+ * Creates a simple alias using a simplified API
  *
- * Use this in your producer project's index.ts to conditionally export
- * the redirect pointer based on configuration.
+ * Convenience wrapper around createStackAlias for common use cases.
  *
  * @example
  * ```typescript
- * // infrastructure/index.ts
- * import { exportCanonicalPointer } from "@egulatee/pulumi-stack-alias";
+ * import { createSimpleAlias } from "@egulatee/pulumi-stack-alias";
  *
- * const config = new pulumi.Config();
- * const aliasTarget = config.get("aliasTarget");
- *
- * if (aliasTarget) {
- *   // This is an alias stack — export only the redirect pointer
- *   exportCanonicalPointer(aliasTarget);
- * } else {
- *   // This is a canonical stack — create actual resources
- *   export const vpcId = myVpc.id;
- *   export const clusterName = pulumi.output("my-cluster");
- * }
+ * const alias = createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+ * export const vpcId = alias.vpcId;
  * ```
  *
- * @param _canonicalStackName - The name of the canonical stack to redirect to
+ * @param targetProject - Target project name
+ * @param targetStack - Target stack name
+ * @param outputs - List of output names to re-export
+ * @returns Record of Pulumi Outputs for each specified output name
  */
-export function exportCanonicalPointer(_canonicalStackName: string): void {
-  // This function is meant to be used with dynamic exports
-  // The caller should use: export const _canonicalStack = result
-  // We'll just log for now, but the real pattern is direct export
-  throw new Error(
-    `exportCanonicalPointer should not be called directly. ` +
-    `Instead, use: export const ${REDIRECT_KEY} = aliasTarget;`
-  );
+export function createSimpleAlias(
+  targetProject: string,
+  targetStack: string,
+  outputs: string[]
+): AliasExports {
+  return createStackAlias({ targetProject, targetStack, outputs });
 }
 
 /**
@@ -120,6 +154,12 @@ export function exportCanonicalPointer(_canonicalStackName: string): void {
  */
 export function matchesPattern(pattern: string, project: string, stack: string): boolean {
   const [projectPattern, stackPattern] = pattern.split("/");
+
+  if (!projectPattern || !stackPattern) {
+    throw new Error(
+      `Invalid pattern format: "${pattern}". Expected "projectPattern/stackPattern".`
+    );
+  }
 
   const projectMatches = matchesWildcard(projectPattern, project);
   const stackMatches = matchesWildcard(stackPattern, stack);

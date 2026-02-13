@@ -1,37 +1,77 @@
 import * as pulumi from "@pulumi/pulumi";
 
 /**
- * The output key used to indicate a stack is an alias pointing to a canonical stack
+ * Configuration for creating a stack alias
  */
-export const REDIRECT_KEY = "_canonicalStack";
-
-/**
- * Options for resolveStackRef function
- */
-export interface ResolveStackRefOptions {
+export interface AliasConfig {
   /**
-   * Target organization name
-   * @default pulumi.getOrganization()
+   * Target organization name (defaults to current organization)
    */
-  org?: string;
+  targetOrg?: string;
+
+  /**
+   * Target project name
+   */
+  targetProject: string;
+
+  /**
+   * Target stack name
+   */
+  targetStack: string;
+
+  /**
+   * List of output names to re-export from the target stack
+   */
+  outputs: string[];
 }
 
 /**
- * Result of stack resolution containing the canonical stack reference
+ * Record of aliased outputs (all are Pulumi Outputs)
  */
-export interface ResolvedStack {
+export type AliasExports = Record<string, pulumi.Output<any>>;
+
+/**
+ * A pattern rule for conditional aliasing
+ */
+export interface PatternRule {
   /**
-   * The canonical stack reference (after following any redirects)
+   * Pattern in format "project/stack" with wildcard support
+   * Examples: "* /prod", "myproject/ *", "* / *-ephemeral" (without spaces)
    */
-  stackRef: pulumi.StackReference;
+  pattern: string;
 
   /**
-   * Whether a redirect was followed (true if alias, false if canonical)
+   * Target stack name to use when this pattern matches
    */
-  wasRedirected: boolean;
+  target: string;
+}
+
+/**
+ * Configuration for creating a conditional alias based on pattern matching
+ */
+export interface ConditionalAliasConfig {
+  /**
+   * Target project name
+   */
+  targetProject: string;
 
   /**
-   * The final stack name that was resolved
+   * Target organization name (defaults to current organization)
    */
-  resolvedStackName: string;
+  targetOrg?: string;
+
+  /**
+   * List of pattern rules (evaluated in order, first match wins)
+   */
+  patterns: PatternRule[];
+
+  /**
+   * Default target stack if no pattern matches (optional)
+   */
+  defaultTarget?: string;
+
+  /**
+   * List of output names to re-export from the target stack
+   */
+  outputs: string[];
 }

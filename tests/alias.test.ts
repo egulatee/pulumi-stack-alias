@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as pulumi from "@pulumi/pulumi";
-import { resolveStackRef, matchesPattern } from "../src/alias";
-import { REDIRECT_KEY } from "../src/types";
+import {
+  matchesPattern,
+  createStackAlias,
+  createConditionalAlias,
+  createSimpleAlias,
+} from "../src/alias";
 
 // Mock Pulumi runtime functions
 vi.mock("@pulumi/pulumi", async () => {
@@ -69,32 +73,168 @@ describe("Pattern Matching", () => {
       expect(matchesPattern("MyProject/Dev", "MyProject", "Dev")).toBe(true);
       expect(matchesPattern("MyProject/Dev", "myproject", "dev")).toBe(false);
     });
+
+    it("should throw error for invalid pattern format", () => {
+      expect(() => matchesPattern("invalid", "project", "stack")).toThrow(
+        'Invalid pattern format: "invalid". Expected "projectPattern/stackPattern".'
+      );
+      expect(() => matchesPattern("project/", "project", "stack")).toThrow(
+        'Invalid pattern format: "project/". Expected "projectPattern/stackPattern".'
+      );
+      expect(() => matchesPattern("/stack", "project", "stack")).toThrow(
+        'Invalid pattern format: "/stack". Expected "projectPattern/stackPattern".'
+      );
+    });
   });
 });
 
-describe("resolveStackRef", () => {
+describe("createStackAlias", () => {
   let mockStackReference: any;
-  let mockGetOutput: any;
+  let mockRequireOutput: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Mock getOutput to return an Output-like object
-    mockGetOutput = vi.fn();
+    mockRequireOutput = vi.fn();
 
-    // Mock StackReference constructor
     mockStackReference = vi.fn().mockImplementation((stackName: string) => {
       return {
         stackName,
-        getOutput: mockGetOutput,
-        requireOutput: vi.fn(),
+        requireOutput: mockRequireOutput,
       };
     });
 
     (pulumi.StackReference as any).mockImplementation(mockStackReference);
-
-    // Reset runtime mocks
     (pulumi.getOrganization as any).mockReturnValue("test-org");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("should create StackReference with correct full name", () => {
+    mockRequireOutput.mockReturnValue(pulumi.output("test-value"));
+
+    createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["vpcId"],
+    });
+
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/shared");
+  });
+
+  it("should use custom org when provided", () => {
+    mockRequireOutput.mockReturnValue(pulumi.output("test-value"));
+
+    createStackAlias({
+      targetOrg: "custom-org",
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["vpcId"],
+    });
+
+    expect(mockStackReference).toHaveBeenCalledWith("custom-org/infrastructure/shared");
+  });
+
+  it("should re-export all specified outputs", () => {
+    mockRequireOutput.mockReturnValue(pulumi.output("test-value"));
+
+    createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["vpcId", "endpoint", "clusterName"],
+    });
+
+    expect(mockRequireOutput).toHaveBeenCalledWith("vpcId");
+    expect(mockRequireOutput).toHaveBeenCalledWith("endpoint");
+    expect(mockRequireOutput).toHaveBeenCalledWith("clusterName");
+    expect(mockRequireOutput).toHaveBeenCalledTimes(3);
+  });
+
+  it("should return Pulumi Outputs", () => {
+    const outputValue = pulumi.output("test-value");
+    mockRequireOutput.mockReturnValue(outputValue);
+
+    const result = createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["vpcId"],
+    });
+
+    expect(result.vpcId).toBe(outputValue);
+  });
+
+  it("should handle empty outputs array", () => {
+    const result = createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: [],
+    });
+
+    expect(result).toEqual({});
+    expect(mockRequireOutput).not.toHaveBeenCalled();
+  });
+
+  it("should work with single output", () => {
+    mockRequireOutput.mockReturnValue(pulumi.output("test-value"));
+
+    const result = createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["vpcId"],
+    });
+
+    expect(Object.keys(result)).toHaveLength(1);
+    expect(result.vpcId).toBeDefined();
+  });
+
+  it("should work with many outputs", () => {
+    mockRequireOutput.mockReturnValue(pulumi.output("test-value"));
+
+    const result = createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["output1", "output2", "output3", "output4", "output5"],
+    });
+
+    expect(Object.keys(result)).toHaveLength(5);
+    expect(mockRequireOutput).toHaveBeenCalledTimes(5);
+  });
+
+  it("should use requireOutput instead of getOutput", () => {
+    mockRequireOutput.mockReturnValue(pulumi.output("test-value"));
+
+    createStackAlias({
+      targetProject: "infrastructure",
+      targetStack: "shared",
+      outputs: ["vpcId"],
+    });
+
+    // Verify requireOutput was called (not getOutput)
+    expect(mockRequireOutput).toHaveBeenCalled();
+  });
+});
+
+describe("createConditionalAlias", () => {
+  let mockStackReference: any;
+  let mockRequireOutput: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mockRequireOutput = vi.fn().mockReturnValue(pulumi.output("test-value"));
+
+    mockStackReference = vi.fn().mockImplementation((stackName: string) => {
+      return {
+        stackName,
+        requireOutput: mockRequireOutput,
+      };
+    });
+
+    (pulumi.StackReference as any).mockImplementation(mockStackReference);
+    (pulumi.getOrganization as any).mockReturnValue("test-org");
+    (pulumi.getProject as any).mockReturnValue("test-project");
     (pulumi.getStack as any).mockReturnValue("dev");
   });
 
@@ -102,156 +242,222 @@ describe("resolveStackRef", () => {
     vi.restoreAllMocks();
   });
 
-  it("should follow redirect when _canonicalStack is present", async () => {
-    // Mock getOutput to return a redirect pointer
-    mockGetOutput.mockReturnValue(
-      pulumi.output("shared") // Redirect to "shared" stack
-    );
+  it("should use first matching pattern", () => {
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [
+        { pattern: "*/dev", target: "shared" },
+        { pattern: "*/staging", target: "shared" },
+        { pattern: "*/prod", target: "prod" },
+      ],
+      outputs: ["vpcId"],
+    });
 
-    const result = resolveStackRef("infrastructure");
-
-    // Verify initial reference was created
-    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/dev");
-
-    // Verify getOutput was called with REDIRECT_KEY
-    expect(mockGetOutput).toHaveBeenCalledWith(REDIRECT_KEY);
-
-    // Resolve the output to get the final StackReference
-    const resolved = await result.promise();
-
-    // Verify redirect was followed and second StackReference was created
     expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/shared");
-    expect(resolved.stackName).toBe("test-org/infrastructure/shared");
   });
 
-  it("should return initial reference when no redirect exists", async () => {
-    // Mock getOutput to return undefined (no redirect)
-    mockGetOutput.mockReturnValue(pulumi.output(undefined));
+  it("should evaluate patterns in order", () => {
+    (pulumi.getStack as any).mockReturnValue("prod");
 
-    const result = resolveStackRef("infrastructure");
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [
+        { pattern: "*/staging", target: "shared" },
+        { pattern: "*/prod", target: "prod" },
+        { pattern: "*/*", target: "fallback" },
+      ],
+      outputs: ["vpcId"],
+    });
 
-    // Verify initial reference was created
-    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/dev");
-
-    // Resolve the output
-    const resolved = await result.promise();
-
-    // Verify no second StackReference was created
-    expect(mockStackReference).toHaveBeenCalledTimes(1);
-    expect(resolved.stackName).toBe("test-org/infrastructure/dev");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/prod");
   });
 
-  it("should return initial reference when redirect is null", async () => {
-    mockGetOutput.mockReturnValue(pulumi.output(null));
+  it("should use defaultTarget when no pattern matches", () => {
+    (pulumi.getStack as any).mockReturnValue("unknown-stack");
 
-    const result = resolveStackRef("infrastructure");
-    const resolved = await result.promise();
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [
+        { pattern: "*/dev", target: "shared" },
+        { pattern: "*/prod", target: "prod" },
+      ],
+      defaultTarget: "fallback",
+      outputs: ["vpcId"],
+    });
 
-    expect(mockStackReference).toHaveBeenCalledTimes(1);
-    expect(resolved.stackName).toBe("test-org/infrastructure/dev");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/fallback");
   });
 
-  it("should return initial reference when redirect is empty string", async () => {
-    mockGetOutput.mockReturnValue(pulumi.output(""));
+  it("should throw error when no pattern matches and no defaultTarget", () => {
+    (pulumi.getStack as any).mockReturnValue("unknown-stack");
 
-    const result = resolveStackRef("infrastructure");
-    const resolved = await result.promise();
-
-    expect(mockStackReference).toHaveBeenCalledTimes(1);
-    expect(resolved.stackName).toBe("test-org/infrastructure/dev");
+    expect(() => {
+      createConditionalAlias({
+        targetProject: "infrastructure",
+        patterns: [
+          { pattern: "*/dev", target: "shared" },
+          { pattern: "*/prod", target: "prod" },
+        ],
+        outputs: ["vpcId"],
+      });
+    }).toThrow("No matching pattern found for test-project/unknown-stack");
   });
 
-  it("should ignore non-string redirect values", async () => {
-    // Mock getOutput to return a number (invalid redirect)
-    mockGetOutput.mockReturnValue(pulumi.output(123));
+  it("should work with complex pattern rules", () => {
+    (pulumi.getProject as any).mockReturnValue("app-service");
+    (pulumi.getStack as any).mockReturnValue("feature-ephemeral");
 
-    const result = resolveStackRef("infrastructure");
-    const resolved = await result.promise();
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [
+        { pattern: "app-*/*-ephemeral", target: "shared" },
+        { pattern: "*/prod", target: "prod" },
+      ],
+      outputs: ["vpcId"],
+    });
 
-    // Should not follow redirect for non-string values
-    expect(mockStackReference).toHaveBeenCalledTimes(1);
-    expect(resolved.stackName).toBe("test-org/infrastructure/dev");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/shared");
   });
 
-  it("should use custom org when provided", async () => {
-    mockGetOutput.mockReturnValue(pulumi.output(undefined));
+  it("should support custom organization", () => {
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      targetOrg: "custom-org",
+      patterns: [{ pattern: "*/dev", target: "shared" }],
+      outputs: ["vpcId"],
+    });
 
-    const result = resolveStackRef("infrastructure", { org: "custom-org" });
-
-    expect(mockStackReference).toHaveBeenCalledWith("custom-org/infrastructure/dev");
-  });
-
-  it("should use custom org when following redirect", async () => {
-    mockGetOutput.mockReturnValue(pulumi.output("shared"));
-
-    const result = resolveStackRef("infrastructure", { org: "custom-org" });
-    await result.promise();
-
-    expect(mockStackReference).toHaveBeenCalledWith("custom-org/infrastructure/dev");
     expect(mockStackReference).toHaveBeenCalledWith("custom-org/infrastructure/shared");
   });
 
-  it("should work with different stack names", async () => {
+  it("should re-export all specified outputs", () => {
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [{ pattern: "*/dev", target: "shared" }],
+      outputs: ["vpcId", "endpoint", "clusterName"],
+    });
+
+    expect(mockRequireOutput).toHaveBeenCalledWith("vpcId");
+    expect(mockRequireOutput).toHaveBeenCalledWith("endpoint");
+    expect(mockRequireOutput).toHaveBeenCalledWith("clusterName");
+  });
+
+  it("should work with different stack contexts", () => {
     (pulumi.getStack as any).mockReturnValue("staging");
-    mockGetOutput.mockReturnValue(pulumi.output("shared"));
 
-    const result = resolveStackRef("infrastructure");
-    await result.promise();
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [
+        { pattern: "*/dev", target: "dev" },
+        { pattern: "*/staging", target: "staging-canonical" },
+        { pattern: "*/prod", target: "prod" },
+      ],
+      outputs: ["vpcId"],
+    });
 
-    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/staging");
-    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/shared");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/staging-canonical");
   });
 
-  it("should work with prod stack (no redirect)", async () => {
-    (pulumi.getStack as any).mockReturnValue("prod");
-    mockGetOutput.mockReturnValue(pulumi.output(undefined));
+  it("should delegate to createStackAlias", () => {
+    const result = createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [{ pattern: "*/dev", target: "shared" }],
+      outputs: ["vpcId"],
+    });
 
-    const result = resolveStackRef("infrastructure");
-    const resolved = await result.promise();
-
-    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/prod");
-    expect(mockStackReference).toHaveBeenCalledTimes(1);
-    expect(resolved.stackName).toBe("test-org/infrastructure/prod");
+    // Verify it returns the same shape as createStackAlias
+    expect(result).toHaveProperty("vpcId");
+    expect(result.vpcId).toBeDefined();
   });
 
-  it("should return Output<StackReference>", () => {
-    mockGetOutput.mockReturnValue(pulumi.output(undefined));
+  it("should match using current project and stack", () => {
+    (pulumi.getProject as any).mockReturnValue("specific-project");
+    (pulumi.getStack as any).mockReturnValue("specific-stack");
 
-    const result = resolveStackRef("infrastructure");
+    createConditionalAlias({
+      targetProject: "infrastructure",
+      patterns: [
+        { pattern: "specific-project/specific-stack", target: "matched" },
+        { pattern: "*/*", target: "fallback" },
+      ],
+      outputs: ["vpcId"],
+    });
 
-    // Verify it's a Pulumi Output
-    expect(result).toHaveProperty("apply");
-    expect(typeof result.apply).toBe("function");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/matched");
   });
+});
 
-  it("should handle chained redirects", async () => {
-    // First call returns redirect to "intermediate"
-    // Second call returns redirect to "final"
-    const firstCall = vi.fn().mockReturnValue(pulumi.output("intermediate"));
-    const secondCall = vi.fn().mockReturnValue(pulumi.output("final"));
+describe("createSimpleAlias", () => {
+  let mockStackReference: any;
+  let mockRequireOutput: any;
 
-    let callCount = 0;
-    mockStackReference.mockImplementation((stackName: string) => {
-      const getOutput = callCount === 0 ? firstCall : secondCall;
-      callCount++;
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mockRequireOutput = vi.fn().mockReturnValue(pulumi.output("test-value"));
+
+    mockStackReference = vi.fn().mockImplementation((stackName: string) => {
       return {
         stackName,
-        getOutput,
-        requireOutput: vi.fn(),
+        requireOutput: mockRequireOutput,
       };
     });
 
-    const result = resolveStackRef("infrastructure");
-    const resolved = await result.promise();
+    (pulumi.StackReference as any).mockImplementation(mockStackReference);
+    (pulumi.getOrganization as any).mockReturnValue("test-org");
+  });
 
-    // Should create initial reference to dev
-    expect(mockStackReference).toHaveBeenNthCalledWith(1, "test-org/infrastructure/dev");
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-    // Should follow first redirect to intermediate
-    expect(mockStackReference).toHaveBeenNthCalledWith(2, "test-org/infrastructure/intermediate");
+  it("should create alias with simplified API", () => {
+    createSimpleAlias("infrastructure", "shared", ["vpcId"]);
 
-    // Note: Current implementation only follows one level of redirect
-    // If we want to support chained redirects, we'd need to make it recursive
-    expect(resolved.stackName).toBe("test-org/infrastructure/intermediate");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/shared");
+    expect(mockRequireOutput).toHaveBeenCalledWith("vpcId");
+  });
+
+  it("should use current organization", () => {
+    (pulumi.getOrganization as any).mockReturnValue("my-org");
+
+    createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+
+    expect(mockStackReference).toHaveBeenCalledWith("my-org/infrastructure/shared");
+  });
+
+  it("should work with single output", () => {
+    const result = createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+
+    expect(Object.keys(result)).toHaveLength(1);
+    expect(result.vpcId).toBeDefined();
+  });
+
+  it("should work with many outputs", () => {
+    const result = createSimpleAlias("infrastructure", "shared", [
+      "vpcId",
+      "endpoint",
+      "clusterName",
+    ]);
+
+    expect(Object.keys(result)).toHaveLength(3);
+    expect(result.vpcId).toBeDefined();
+    expect(result.endpoint).toBeDefined();
+    expect(result.clusterName).toBeDefined();
+  });
+
+  it("should return Pulumi Outputs", () => {
+    const result = createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+
+    expect(result.vpcId).toBeDefined();
+    expect(mockRequireOutput).toHaveBeenCalledWith("vpcId");
+  });
+
+  it("should delegate to createStackAlias", () => {
+    const result = createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+
+    // Verify it returns the same shape as createStackAlias
+    expect(result).toHaveProperty("vpcId");
+    expect(mockStackReference).toHaveBeenCalledWith("test-org/infrastructure/shared");
   });
 });

@@ -1,6 +1,6 @@
 # @egulatee/pulumi-stack-alias
 
-A lightweight Pulumi library that enables **producer-controlled stack aliasing** through redirect pointers. Eliminates output staleness and operational overhead while keeping aliasing decisions with the infrastructure project.
+Producer-side stack aliasing for Pulumi using lightweight proxy stacks. Consumers use standard `StackReference` (zero library dependency), while producers use this library to create alias stacks that re-export outputs from canonical stacks.
 
 [![CI](https://github.com/egulatee/pulumi-stack-alias/actions/workflows/ci.yml/badge.svg)](https://github.com/egulatee/pulumi-stack-alias/actions/workflows/ci.yml)
 [![npm version](https://badge.fury.io/js/@egulatee%2Fpulumi-stack-alias.svg)](https://www.npmjs.com/package/@egulatee/pulumi-stack-alias)
@@ -11,51 +11,67 @@ A lightweight Pulumi library that enables **producer-controlled stack aliasing**
 When managing infrastructure across multiple environments (dev, staging, prod), consumer projects need to reference shared infrastructure stacks. Traditional approaches either:
 - Force consumers to know which stack holds the real resources
 - Scatter mapping logic across every consumer project
-- Create heavy proxy stacks that re-export all outputs (causing staleness)
+- Require complex consumer-side resolvers with library dependencies
 
 **The aliasing decision belongs with the producer (infrastructure project), not the consumer.**
 
-## Solution: Producer-Controlled Redirect
+## Solution: Producer-Controlled Proxy Stacks
 
-Alias stacks export a single `_canonicalStack` redirect pointer instead of re-exporting all outputs. The consumer-side resolver transparently follows redirects to reach the canonical stack, ensuring outputs are always fresh.
+Alias stacks re-export outputs from canonical stacks. Consumers use standard Pulumi `StackReference` with **no library dependency**. Producers use this library to create lightweight proxy stacks.
 
 ### How It Works
 
 ```
 infrastructure/shared    → canonical stack, exports real resources
-infrastructure/dev       → alias stack, exports only { _canonicalStack: "shared" }
-infrastructure/staging   → alias stack, exports only { _canonicalStack: "shared" }
-infrastructure/prod      → canonical stack (no _canonicalStack), exports real resources
+infrastructure/dev       → proxy stack, re-exports outputs from shared
+infrastructure/staging   → proxy stack, re-exports outputs from shared
+infrastructure/prod      → canonical stack, exports real resources
 ```
 
-Consumer calls `resolveStackRef("infrastructure")`:
-1. Creates a `StackReference` to `infrastructure/${currentStack}` (e.g., `infrastructure/dev`)
-2. Checks for `_canonicalStack` output
-3. If present, follows the redirect to `infrastructure/shared`
-4. If absent, returns the current reference (already canonical)
+Consumer uses standard Pulumi:
+```typescript
+const stack = new pulumi.StackReference(`org/infrastructure/${pulumi.getStack()}`);
+const vpcId = stack.requireOutput("vpcId");
+```
+
+**Zero consumer dependencies!** The consumer has no knowledge of aliasing. When `application/dev` deploys, it reads `infrastructure/dev`, which is a proxy stack that re-exports outputs from `infrastructure/shared`.
 
 ## Installation
 
+**Producer projects only:**
 ```bash
 npm install @egulatee/pulumi-stack-alias
 ```
+
+**Consumer projects:** No installation needed! Use standard Pulumi `StackReference`.
 
 ## Usage
 
 ### Producer Side (Infrastructure Project)
 
-Create lightweight alias stacks that export only a redirect pointer:
+Create alias stacks that re-export outputs from canonical stacks:
+
+#### Simple Alias
 
 ```typescript
 // infrastructure/index.ts
+import { createStackAlias } from "@egulatee/pulumi-stack-alias";
 import * as pulumi from "@pulumi/pulumi";
 
 const config = new pulumi.Config();
 const aliasTarget = config.get("aliasTarget");
 
 if (aliasTarget) {
-  // This is an alias stack — export only the redirect pointer
-  export const _canonicalStack = aliasTarget;
+  // This is an alias stack — re-export outputs from target
+  const alias = createStackAlias({
+    targetProject: "infrastructure",
+    targetStack: aliasTarget,
+    outputs: ["vpcId", "endpoint", "clusterName"],
+  });
+
+  export const vpcId = alias.vpcId;
+  export const endpoint = alias.endpoint;
+  export const clusterName = alias.clusterName;
 } else {
   // This is a canonical stack — create actual resources
   const vpc = new aws.ec2.Vpc("main", {
@@ -63,8 +79,8 @@ if (aliasTarget) {
   });
 
   export const vpcId = vpc.id;
-  export const clusterName = pulumi.output("my-cluster");
   export const endpoint = pulumi.output("https://api.example.com");
+  export const clusterName = pulumi.output("my-cluster");
 }
 ```
 
@@ -88,29 +104,58 @@ config:
   # No aliasTarget — this is a canonical stack (separate from shared)
 ```
 
-Deploy your stacks:
+#### Conditional Alias (Pattern-Based)
 
-```bash
-# Deploy canonical stacks (creates real resources)
-pulumi up --stack shared
-pulumi up --stack prod
+For automatic aliasing without config:
 
-# Deploy alias stacks (one-time, trivial — just sets a pointer)
-pulumi up --stack dev
-pulumi up --stack staging
+```typescript
+// infrastructure/index.ts
+import { createConditionalAlias } from "@egulatee/pulumi-stack-alias";
+
+const alias = createConditionalAlias({
+  targetProject: "infrastructure",
+  patterns: [
+    { pattern: "*/prod", target: "prod" },
+    { pattern: "*/staging", target: "shared" },
+    { pattern: "*/dev", target: "shared" },
+    { pattern: "*/*-ephemeral", target: "shared" },
+  ],
+  defaultTarget: "shared",
+  outputs: ["vpcId", "endpoint", "clusterName"],
+});
+
+export const vpcId = alias.vpcId;
+export const endpoint = alias.endpoint;
+export const clusterName = alias.clusterName;
+```
+
+#### Simple API
+
+Simplified API for common cases:
+
+```typescript
+import { createSimpleAlias } from "@egulatee/pulumi-stack-alias";
+
+const alias = createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+export const vpcId = alias.vpcId;
 ```
 
 ### Consumer Side (Application Project)
 
-Use the resolver to transparently follow redirects:
+Use standard Pulumi `StackReference` — **no library dependency**:
 
 ```typescript
 // application/index.ts
 import * as pulumi from "@pulumi/pulumi";
-import { resolveStackRef } from "@egulatee/pulumi-stack-alias";
+import * as aws from "@pulumi/aws";
 
-const infraStack = resolveStackRef("infrastructure");
-const vpcId = infraStack.apply(ref => ref.requireOutput("vpcId"));
+// Standard Pulumi StackReference — no special library needed!
+const infraStack = new pulumi.StackReference(
+  `${pulumi.getOrganization()}/infrastructure/${pulumi.getStack()}`
+);
+
+const vpcId = infraStack.requireOutput("vpcId");
+const endpoint = infraStack.requireOutput("endpoint");
 
 const subnet = new aws.ec2.Subnet("app-subnet", {
   vpcId: vpcId,
@@ -118,57 +163,139 @@ const subnet = new aws.ec2.Subnet("app-subnet", {
 });
 ```
 
-The consumer has **zero knowledge** of the aliasing. When `application/dev` deploys:
-1. Resolver reads `infrastructure/dev`
-2. Finds `_canonicalStack: "shared"`
-3. Returns `StackReference` to `infrastructure/shared`
-4. Outputs are always fresh from the canonical stack!
+The consumer has **zero knowledge** of aliasing. When `application/dev` deploys:
+1. Reads `infrastructure/dev` (a proxy stack)
+2. Gets outputs (re-exported from `infrastructure/shared`)
+3. No library dependency required!
 
 ## Deployment Flow
 
-```bash
-# Deploy canonical stack (creates real resources)
-pulumi up --stack shared
+### Initial Setup
 
-# Deploy alias stacks (one-time, trivial)
+```bash
+# Deploy canonical stacks (creates real resources)
+pulumi up --stack shared
+pulumi up --stack prod
+
+# Deploy alias stacks (creates proxy outputs)
 pulumi up --stack dev
 pulumi up --stack staging
 
 # Consumer deployments — no alias awareness needed
 cd application && pulumi up --stack dev
-# → resolver reads infrastructure/dev
-# → follows _canonicalStack
-# → reads infrastructure/shared
 ```
 
-## Why Output Staleness Is Gone
+### Keeping Outputs Fresh
 
-Alias stacks export only `_canonicalStack: "shared"` — a string that almost never changes. The actual resource outputs (VPC IDs, endpoints, cluster names) are read **live** from the canonical stack at consumer deploy time.
+Alias stacks capture outputs at deploy time. When canonical stack outputs change, redeploy aliases:
 
-You only need to redeploy an alias stack if the redirect itself changes (e.g., moving `dev` from `shared` to its own dedicated stack).
+```bash
+# Update canonical stack
+pulumi up --stack shared
+
+# Sync alias stacks (fast — no real resources)
+pulumi up --stack dev
+pulumi up --stack staging
+```
+
+### CI/CD Orchestration
+
+Automate alias synchronization in CI/CD:
+
+```yaml
+# .github/workflows/deploy.yml
+jobs:
+  deploy-canonical:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy shared stack
+        run: pulumi up --stack shared --yes
+
+  sync-aliases:
+    needs: deploy-canonical
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack: [dev, staging]
+    steps:
+      - name: Sync alias stack
+        run: pulumi up --stack ${{ matrix.stack }} --yes
+```
+
+Alias deployments are fast (seconds) since they create no real resources — just re-export outputs.
 
 ## API Reference
 
-### `resolveStackRef(project, opts?)`
+### `createStackAlias(config)`
 
-Resolves a stack reference by checking for producer-controlled redirects.
+Creates a stack alias that re-exports outputs from a target stack.
 
 **Parameters:**
-- `project` (string) - Target project name (e.g., `"infrastructure"`)
-- `opts` (optional)
-  - `org` (string) - Target organization (defaults to current org)
+- `config.targetProject` (string) - Target project name
+- `config.targetStack` (string) - Target stack name
+- `config.targetOrg` (optional string) - Target organization (defaults to current org)
+- `config.outputs` (string[]) - List of output names to re-export
 
-**Returns:** `pulumi.Output<pulumi.StackReference>` - The resolved stack reference
+**Returns:** `AliasExports` - Record of Pulumi Outputs
 
 **Example:**
 ```typescript
-const infraStack = resolveStackRef("infrastructure");
-const vpcId = infraStack.apply(ref => ref.requireOutput("vpcId"));
+const alias = createStackAlias({
+  targetProject: "infrastructure",
+  targetStack: "shared",
+  outputs: ["vpcId", "endpoint"],
+});
+
+export const vpcId = alias.vpcId;
+export const endpoint = alias.endpoint;
+```
+
+### `createConditionalAlias(config)`
+
+Creates a conditional alias based on pattern matching.
+
+**Parameters:**
+- `config.targetProject` (string) - Target project name
+- `config.patterns` (PatternRule[]) - Pattern matching rules (evaluated in order, first match wins)
+- `config.defaultTarget` (optional string) - Default target if no pattern matches
+- `config.targetOrg` (optional string) - Target organization (defaults to current org)
+- `config.outputs` (string[]) - List of output names to re-export
+
+**Returns:** `AliasExports` - Record of Pulumi Outputs
+
+**Example:**
+```typescript
+const alias = createConditionalAlias({
+  targetProject: "infrastructure",
+  patterns: [
+    { pattern: "*/prod", target: "prod" },
+    { pattern: "*/dev", target: "shared" },
+  ],
+  defaultTarget: "shared",
+  outputs: ["vpcId"],
+});
+```
+
+### `createSimpleAlias(targetProject, targetStack, outputs)`
+
+Simplified API for creating aliases.
+
+**Parameters:**
+- `targetProject` (string) - Target project name
+- `targetStack` (string) - Target stack name
+- `outputs` (string[]) - List of output names to re-export
+
+**Returns:** `AliasExports` - Record of Pulumi Outputs
+
+**Example:**
+```typescript
+const alias = createSimpleAlias("infrastructure", "shared", ["vpcId"]);
+export const vpcId = alias.vpcId;
 ```
 
 ### `matchesPattern(pattern, project, stack)`
 
-Pattern matching with wildcard support. Useful for producer-side conditional logic.
+Pattern matching with wildcard support.
 
 **Wildcard rules:**
 - `*` matches any value
@@ -180,164 +307,179 @@ Pattern matching with wildcard support. Useful for producer-side conditional log
 ```typescript
 import { matchesPattern } from "@egulatee/pulumi-stack-alias";
 
-if (matchesPattern("*/dev", currentProject, currentStack)) {
-  export const _canonicalStack = "shared";
-}
+matchesPattern("*/dev", "myproject", "dev")        // true
+matchesPattern("*/*-ephemeral", "app", "pr-123-ephemeral")  // true
+matchesPattern("app-*/prod-*", "app-api", "prod-us")        // true
 ```
 
-### Constants
+## Pattern Format
 
-#### `REDIRECT_KEY`
+Patterns follow the format: `"projectPattern/stackPattern"`
 
-The output key used to indicate a stack is an alias: `"_canonicalStack"`
-
-## Pattern Matching for Producer Logic
-
-You can use pattern matching in your producer project to conditionally set redirects:
-
-```typescript
-// infrastructure/index.ts
-import * as pulumi from "@pulumi/pulumi";
-import { matchesPattern } from "@egulatee/pulumi-stack-alias";
-
-const project = pulumi.getProject();
-const stack = pulumi.getStack();
-
-// Pattern-based aliasing rules
-const patterns = [
-  { pattern: "*/dev", target: "shared" },
-  { pattern: "*/staging", target: "shared" },
-  { pattern: "*/*-ephemeral", target: "shared" },
-];
-
-let canonicalStack: string | undefined;
-for (const p of patterns) {
-  if (matchesPattern(p.pattern, project, stack)) {
-    canonicalStack = p.target;
-    break;
-  }
-}
-
-if (canonicalStack) {
-  // This is an alias stack
-  export const _canonicalStack = canonicalStack;
-} else {
-  // This is a canonical stack — create resources
-  export const vpcId = /* ... */;
-}
-```
+Examples:
+- `"*/dev"` - Any project, stack must be "dev"
+- `"myproject/*"` - Project must be "myproject", any stack
+- `"*/*-ephemeral"` - Any project, stack must end with "-ephemeral"
+- `"app-*/prod-*"` - Project must start with "app-", stack must start with "prod-"
 
 ## Comparison with Other Approaches
 
-| Concern | Full Proxy Stacks | Consumer Config | Producer-Controlled Redirect |
+| Concern | Producer Redirect (v0.1.0) | Producer Proxy (v0.2.0) | Consumer Config |
 |---|---|---|---|
-| Who owns mapping | Producer | Consumer | Producer ✓ |
-| Consumer config needed | None ✓ | Yes (per stack) | None ✓ |
-| Alias stack weight | Heavy (all outputs) | N/A | Trivial (one pointer) ✓ |
-| Output freshness | Stale until redeployed | Always live ✓ | Always live ✓ |
-| Redeploy aliases when canonical changes | Yes, every time | N/A | No ✓ |
-| Consumer code | `new StackReference(...)` ✓ | Custom resolver | `resolveStackRef(...)` |
-| Operational overhead | High | Low ✓ | Low ✓ |
+| Who owns mapping | Producer ✓ | Producer ✓ | Consumer |
+| Consumer library dependency | Yes | **None** ✓ | Varies |
+| Alias stack weight | Trivial (one pointer) | Light (output refs) | N/A |
+| Output freshness | Always live ✓ | Stale until redeployed* | Always live ✓ |
+| Consumer code | `resolveStackRef(...)` | `new StackReference(...)` ✓ | Custom |
+| CI/CD orchestration | Not needed | Recommended | Not needed |
+
+\* *Mitigated with CI/CD automation — alias deployments are fast (seconds)*
 
 ## Benefits
 
+✅ **Zero consumer dependencies** - Consumers use standard Pulumi `StackReference`
 ✅ **Producer-controlled** - Infrastructure projects own aliasing decisions
-✅ **Always fresh** - Outputs are read live from canonical stacks
-✅ **Lightweight** - Alias stacks export only a redirect pointer
-✅ **Zero consumer config** - Consumers have no aliasing awareness
-✅ **Flexible** - Easy to change mappings without touching consumers
 ✅ **Type-safe** - Full TypeScript support
+✅ **Flexible patterns** - Wildcard pattern matching for conditional aliasing
+✅ **CI/CD friendly** - Fast alias deployments (no real resources)
+✅ **Simple API** - Three functions cover all use cases
+
+## Trade-offs
+
+**Pros:**
+- Zero consumer library dependency
+- Standard Pulumi patterns
+- Simple mental model
+
+**Cons:**
+- Alias stacks need redeployment when canonical outputs change (mitigated with CI/CD)
+- Slightly more operational overhead than redirect pattern (but eliminates consumer dependencies)
 
 ## Use Cases
 
 ### Shared Development Infrastructure
 
-Deploy CI/CD infrastructure once on a shared cluster, route dev/staging to it:
+Deploy infrastructure once, route dev/staging to it:
 
-```yaml
-# infrastructure/Pulumi.dev.yaml
-config:
-  infrastructure:aliasTarget: shared
-
-# infrastructure/Pulumi.staging.yaml
-config:
-  infrastructure:aliasTarget: shared
+```typescript
+const alias = createConditionalAlias({
+  targetProject: "infrastructure",
+  patterns: [
+    { pattern: "*/prod", target: "prod" },
+  ],
+  defaultTarget: "shared",
+  outputs: ["vpcId", "endpoint"],
+});
 ```
 
-### Environment-Specific Production
+### Ephemeral PR Environments
 
-Production uses dedicated infrastructure, dev/staging share:
+Route ephemeral stacks to shared infrastructure:
 
-```yaml
-# infrastructure/Pulumi.prod.yaml
-config:
-  # No alias — dedicated prod infrastructure
-
-# infrastructure/Pulumi.dev.yaml
-config:
-  infrastructure:aliasTarget: shared
+```typescript
+const alias = createConditionalAlias({
+  targetProject: "infrastructure",
+  patterns: [
+    { pattern: "*/*-ephemeral", target: "shared" },
+    { pattern: "*/prod", target: "prod" },
+  ],
+  defaultTarget: "shared",
+  outputs: ["vpcId"],
+});
 ```
 
 ### Multi-Region Deployments
 
-Route regional stacks to regional canonical infrastructure:
+Route regional stacks to regional infrastructure:
 
-```yaml
-# infrastructure/Pulumi.us-east-1.yaml
-config:
-  infrastructure:aliasTarget: us-east
-
-# infrastructure/Pulumi.us-west-1.yaml
-config:
-  infrastructure:aliasTarget: us-west
+```typescript
+const alias = createConditionalAlias({
+  targetProject: "infrastructure",
+  patterns: [
+    { pattern: "*/us-*", target: "us-east" },
+    { pattern: "*/eu-*", target: "eu-west" },
+  ],
+  outputs: ["vpcId"],
+});
 ```
 
 ## Examples
 
 See the [examples](./examples) directory for complete implementations:
-- [Simple Redirect](./examples/simple-redirect) - Basic producer-controlled aliasing
-- [Pattern-Based](./examples/pattern-based) - Conditional redirect logic
+- [Simple Alias](./examples/simple-alias) - Basic proxy stack
+- [Conditional Alias](./examples/conditional-alias) - Pattern-based aliasing
 
-## Migration from Previous Versions
+## Migration Guide
 
-If you were using the old `createStackAlias()` pattern (full proxy stacks), migrate to the Producer-Controlled Redirect pattern:
+### From v0.1.0 (Redirect Pattern) to v0.2.0 (Proxy Pattern)
 
-**Before (v1.x - Full Proxy Stacks):**
+This is a **breaking change** — complete API rewrite.
+
+#### Producer Changes
+
+**Before (v0.1.0):**
 ```typescript
-// infrastructure/index.ts - OLD
-const alias = createStackAlias({
-  targetProject: "infrastructure",
-  targetStack: "shared",
-  outputs: ["vpcId", "endpoint"],
-});
-export const vpcId = alias.vpcId;
-export const endpoint = alias.endpoint;
-```
-
-**After (v2.x - Producer-Controlled Redirect):**
-```typescript
-// infrastructure/index.ts - NEW
+// infrastructure/index.ts
 const config = new pulumi.Config();
 const aliasTarget = config.get("aliasTarget");
 
 if (aliasTarget) {
   export const _canonicalStack = aliasTarget;
 } else {
-  export const vpcId = /* actual resource */;
-  export const endpoint = /* actual resource */;
+  export const vpcId = vpc.id;
 }
 ```
 
-**Consumer code changes:**
+**After (v0.2.0):**
 ```typescript
-// Before
-const infraStack = new pulumi.StackReference(`${org}/infrastructure/${stack}`);
-const vpcId = infraStack.requireOutput("vpcId");
+// infrastructure/index.ts
+import { createStackAlias } from "@egulatee/pulumi-stack-alias";
 
-// After
+const config = new pulumi.Config();
+const aliasTarget = config.get("aliasTarget");
+
+if (aliasTarget) {
+  const alias = createStackAlias({
+    targetProject: "infrastructure",
+    targetStack: aliasTarget,
+    outputs: ["vpcId", "endpoint"],
+  });
+
+  export const vpcId = alias.vpcId;
+  export const endpoint = alias.endpoint;
+} else {
+  export const vpcId = vpc.id;
+  export const endpoint = /* ... */;
+}
+```
+
+#### Consumer Changes
+
+**Before (v0.1.0):**
+```typescript
+import { resolveStackRef } from "@egulatee/pulumi-stack-alias";
+
 const infraStack = resolveStackRef("infrastructure");
 const vpcId = infraStack.apply(ref => ref.requireOutput("vpcId"));
 ```
+
+**After (v0.2.0):**
+```typescript
+// NO LIBRARY IMPORT NEEDED!
+const infraStack = new pulumi.StackReference(
+  `${pulumi.getOrganization()}/infrastructure/${pulumi.getStack()}`
+);
+const vpcId = infraStack.requireOutput("vpcId");
+```
+
+#### Migration Steps
+
+1. **Update package.json**: Bump to `@egulatee/pulumi-stack-alias@^0.2.0`
+2. **Update producer code**: Replace `_canonicalStack` exports with `createStackAlias()` calls
+3. **Update consumer code**: Replace `resolveStackRef()` with standard `new StackReference()`
+4. **Remove consumer dependency**: Uninstall `@egulatee/pulumi-stack-alias` from consumer projects
+5. **Redeploy all stacks**: Alias stacks need one-time redeployment to export new outputs
+6. **Set up CI/CD**: Add alias sync jobs to keep outputs fresh
 
 ## Contributing
 
